@@ -1,0 +1,23 @@
+[
+  {
+    "name": "Portfolio performance pass",
+    "business_value": 9.0,
+    "time_criticality": 8.0,
+    "risk_reduction": 6.0,
+    "effort": 4.0
+  },
+  {
+    "name": "CLI telemetry extension",
+    "business_value": 8.0,
+    "time_criticality": 7.0,
+    "risk_reduction": 7.0,
+    "effort": 3.5
+  },
+  {
+    "name": "UI polish sweep",
+    "business_value": 6.5,
+    "time_criticality": 5.0,
+    "risk_reduction": 4.0,
+    "effort": 2.5
+  }
+]
