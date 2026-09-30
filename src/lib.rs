@@ -101,14 +101,66 @@ pub fn select_batch_detailed(tasks: &[Task], budget: f64) -> BatchPlan {
     select_from_ranked(ranked, budget)
 }
 
-pub fn select_batch_detailed_filtered(tasks: &[Task], budget: f64, min_score: f64, top: usize) -> BatchPlan {
+pub fn select_batch_detailed_filtered(
+    tasks: &[Task],
+    budget: f64,
+    min_score: f64,
+    top: usize,
+) -> BatchPlan {
     let ranked = prioritize_with_filters(tasks, min_score, top);
     select_from_ranked(ranked, budget)
 }
 
+/// The modified Fibonacci scale SAFe uses for relative WSJF estimates.
+pub const RELATIVE_SCALE: [f64; 7] = [1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 20.0];
+
+fn snap_to_scale(value: f64) -> f64 {
+    RELATIVE_SCALE
+        .iter()
+        .copied()
+        .min_by(|a, b| (a - value).abs().total_cmp(&(b - value).abs()))
+        .unwrap_or(1.0)
+}
+
+fn relative_column(tasks: &[Task], pick: fn(&Task) -> f64) -> Vec<f64> {
+    let smallest = tasks.iter().map(pick).fold(f64::INFINITY, f64::min);
+    // Shift so the smallest item sits at 1 even when raw scores include 0.
+    let offset = if smallest > 0.0 { 0.0 } else { 1.0 - smallest };
+    let anchor = smallest + offset;
+    tasks
+        .iter()
+        .map(|task| snap_to_scale((pick(task) + offset) / anchor))
+        .collect()
+}
+
+/// Rewrites the three cost-of-delay components as relative estimates, the
+/// way SAFe runs WSJF: one column at a time, the smallest item becomes 1 and
+/// every other item is sized against it on the modified Fibonacci scale.
+/// Raw scores from different people drift in absolute terms; ratios to a
+/// shared anchor do not, so the ranking stops rewarding whoever scored high.
+/// Effort stays in real units so the budget keeps its meaning.
+pub fn to_relative_scale(tasks: &[Task]) -> Vec<Task> {
+    if tasks.is_empty() {
+        return Vec::new();
+    }
+    let value = relative_column(tasks, |t| t.business_value);
+    let time = relative_column(tasks, |t| t.time_criticality);
+    let risk = relative_column(tasks, |t| t.risk_reduction);
+    tasks
+        .iter()
+        .enumerate()
+        .map(|(i, task)| Task {
+            business_value: value[i],
+            time_criticality: time[i],
+            risk_reduction: risk[i],
+            ..task.clone()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{prioritize, prioritize_with_filters, select_batch, wsjf, Task};
+    use super::{prioritize, prioritize_with_filters, select_batch, to_relative_scale, wsjf, Task};
 
     #[test]
     fn prioritize_orders_by_highest_score_first() {
@@ -229,5 +281,51 @@ mod tests {
 
         let (_plan, used) = select_batch(&tasks, 7.0);
         assert!(used <= 7.0);
+    }
+
+    fn task(name: &str, value: f64, time: f64, risk: f64, effort: f64) -> Task {
+        Task {
+            name: name.to_string(),
+            business_value: value,
+            time_criticality: time,
+            risk_reduction: risk,
+            effort,
+        }
+    }
+
+    #[test]
+    fn relative_scale_anchors_smallest_item_at_one() {
+        let tasks = vec![task("A", 2.0, 4.0, 3.0, 2.0), task("B", 6.0, 8.0, 9.0, 5.0)];
+
+        let relative = to_relative_scale(&tasks);
+        assert_eq!(relative[0].business_value, 1.0);
+        assert_eq!(relative[1].business_value, 3.0);
+        assert_eq!(relative[1].time_criticality, 2.0);
+        assert_eq!(relative[1].risk_reduction, 3.0);
+        assert_eq!(relative[1].effort, 5.0, "effort keeps real units");
+    }
+
+    #[test]
+    fn relative_scale_snaps_and_caps_on_fibonacci() {
+        let tasks = vec![
+            task("A", 1.0, 1.0, 1.0, 1.0),
+            task("B", 7.0, 11.0, 99.0, 1.0),
+        ];
+
+        let relative = to_relative_scale(&tasks);
+        assert_eq!(relative[1].business_value, 8.0);
+        assert_eq!(relative[1].time_criticality, 13.0);
+        assert_eq!(relative[1].risk_reduction, 20.0);
+    }
+
+    #[test]
+    fn relative_scale_handles_zero_scores() {
+        let tasks = vec![task("A", 0.0, 0.0, 0.0, 1.0), task("B", 2.0, 0.0, 4.0, 1.0)];
+
+        let relative = to_relative_scale(&tasks);
+        assert_eq!(relative[0].business_value, 1.0);
+        assert_eq!(relative[1].business_value, 3.0);
+        assert_eq!(relative[1].time_criticality, 1.0);
+        assert_eq!(relative[1].risk_reduction, 5.0);
     }
 }

@@ -1,6 +1,6 @@
 use std::{env, fs};
 
-use forgequeue::{select_batch_detailed_filtered, BatchPlan, Task};
+use forgequeue::{select_batch_detailed_filtered, to_relative_scale, BatchPlan, Task};
 
 #[derive(Debug)]
 struct CliOptions {
@@ -9,12 +9,16 @@ struct CliOptions {
     min_score: f64,
     top: usize,
     output_json: bool,
+    relative: bool,
 }
 
 fn print_usage() {
     println!("ForgeQueue RS");
     println!("Usage:");
-    println!("  cargo run -- [--input <json-file>] [--budget <value>] [--min-score <value>] [--top <n>] [--json]");
+    println!("  cargo run -- [--input <json-file>] [--budget <value>] [--min-score <value>] [--top <n>] [--relative] [--json]");
+    println!();
+    println!("  --relative  rescale value, time criticality and risk reduction so the");
+    println!("              smallest item in each is 1, snapped to 1,2,3,5,8,13,20");
     println!();
     println!("Example:");
     println!("  cargo run -- --input data/tasks.sample.json --budget 7 --json");
@@ -26,6 +30,7 @@ fn parse_args(args: &[String]) -> Result<CliOptions, String> {
     let mut min_score = 0.0;
     let mut top = 0usize;
     let mut output_json = false;
+    let mut relative = false;
     let mut index = 0;
 
     while index < args.len() {
@@ -52,6 +57,9 @@ fn parse_args(args: &[String]) -> Result<CliOptions, String> {
             }
             "--json" => {
                 output_json = true;
+            }
+            "--relative" => {
+                relative = true;
             }
             "--min-score" => {
                 index += 1;
@@ -84,6 +92,7 @@ fn parse_args(args: &[String]) -> Result<CliOptions, String> {
         min_score,
         top,
         output_json,
+        relative,
     })
 }
 
@@ -114,7 +123,8 @@ fn default_tasks() -> Vec<Task> {
 }
 
 fn parse_tasks_json(raw: &str) -> Result<Vec<Task>, String> {
-    let tasks: Vec<Task> = serde_json::from_str(raw).map_err(|err| format!("Invalid JSON: {err}"))?;
+    let tasks: Vec<Task> =
+        serde_json::from_str(raw).map_err(|err| format!("Invalid JSON: {err}"))?;
     if tasks.is_empty() {
         return Err(String::from("Input file must include at least one task."));
     }
@@ -147,11 +157,18 @@ fn run() -> Result<(), String> {
         Some(input_path) => load_tasks(&input_path)?,
         None => default_tasks(),
     };
+    let tasks = if options.relative {
+        to_relative_scale(&tasks)
+    } else {
+        tasks
+    };
 
-    let plan = select_batch_detailed_filtered(&tasks, options.budget, options.min_score, options.top);
+    let plan =
+        select_batch_detailed_filtered(&tasks, options.budget, options.min_score, options.top);
 
     if options.output_json {
-        let payload = serde_json::to_string_pretty(&plan).map_err(|err| format!("Serialization error: {err}"))?;
+        let payload = serde_json::to_string_pretty(&plan)
+            .map_err(|err| format!("Serialization error: {err}"))?;
         println!("{payload}");
     } else {
         print_text_plan(&plan);
