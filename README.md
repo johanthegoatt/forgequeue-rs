@@ -6,6 +6,7 @@ Rust CLI/library for high-throughput prioritization using WSJF-style scoring.
 
 - Rank tasks by weighted shortest-job-first
 - Select delivery batch under effort budget
+- Dependencies: a task can list `depends_on` names. In rank order a task pulls its unmet prerequisites into the batch with it, and the bundle goes in whole or not at all, so cheaper lower-ranked work can't crowd out a high-value task. Names not in the input count as done; loops are rejected. Tasks that would fit but wait on something left out are listed as blocked.
 - Fast deterministic prioritization logic with tests
 
 ## Run

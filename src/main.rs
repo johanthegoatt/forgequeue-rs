@@ -110,6 +110,7 @@ fn default_tasks() -> Vec<Task> {
             time_criticality: 8.0,
             risk_reduction: 6.0,
             effort: 4.0,
+            depends_on: vec![],
         },
         Task {
             name: "CLI telemetry extension".to_string(),
@@ -117,6 +118,7 @@ fn default_tasks() -> Vec<Task> {
             time_criticality: 7.0,
             risk_reduction: 7.0,
             effort: 3.5,
+            depends_on: vec![],
         },
         Task {
             name: "UI polish sweep".to_string(),
@@ -124,6 +126,7 @@ fn default_tasks() -> Vec<Task> {
             time_criticality: 5.0,
             risk_reduction: 4.0,
             effort: 2.5,
+            depends_on: vec![],
         },
     ]
 }
@@ -153,6 +156,12 @@ fn print_text_plan(plan: &BatchPlan) {
         println!(
             " - {} | score {:.2} | effort {:.2}",
             item.task.name, item.score, item.task.effort
+        );
+    }
+    if !plan.blocked.is_empty() {
+        println!(
+            "Waiting on work outside this batch: {}",
+            plan.blocked.join(", ")
         );
     }
 }

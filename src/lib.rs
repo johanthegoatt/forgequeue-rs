@@ -7,6 +7,10 @@ pub struct Task {
     pub time_criticality: f64,
     pub risk_reduction: f64,
     pub effort: f64,
+    /// Names of tasks that must ship first. A name that is not in the input
+    /// is treated as already done.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -21,6 +25,9 @@ pub struct BatchPlan {
     pub used_effort: f64,
     pub skipped_tasks: usize,
     pub selected: Vec<RankedTask>,
+    /// Tasks that had room in the budget but wait on something not in the batch.
+    #[serde(default)]
+    pub blocked: Vec<String>,
 }
 
 /// Checks a task list before it is scored. NaN compares false against every
@@ -48,6 +55,57 @@ pub fn validate_tasks(tasks: &[Task]) -> Result<(), String> {
                 ));
             }
         }
+    }
+    check_dependency_cycles(tasks)
+}
+
+// Depth-first search for a cycle; a loop of tasks could never be started.
+fn check_dependency_cycles(tasks: &[Task]) -> Result<(), String> {
+    use std::collections::HashMap;
+    let by_name: HashMap<String, &Task> = tasks
+        .iter()
+        .map(|t| (t.name.trim().to_lowercase(), t))
+        .collect();
+    // 0 = not seen, 1 = on the current path, 2 = done.
+    let mut mark: HashMap<String, u8> = HashMap::new();
+
+    fn visit(
+        key: &str,
+        by_name: &HashMap<String, &Task>,
+        mark: &mut HashMap<String, u8>,
+        path: &mut Vec<String>,
+    ) -> Result<(), String> {
+        match mark.get(key).copied().unwrap_or(0) {
+            2 => return Ok(()),
+            1 => {
+                path.push(key.to_string());
+                return Err(format!(
+                    "Tasks depend on each other in a loop: {}.",
+                    path.join(" -> ")
+                ));
+            }
+            _ => {}
+        }
+        let Some(task) = by_name.get(key) else {
+            return Ok(());
+        };
+        mark.insert(key.to_string(), 1);
+        path.push(key.to_string());
+        for dep in &task.depends_on {
+            visit(&dep.trim().to_lowercase(), by_name, mark, path)?;
+        }
+        path.pop();
+        mark.insert(key.to_string(), 2);
+        Ok(())
+    }
+
+    for task in tasks {
+        visit(
+            &task.name.trim().to_lowercase(),
+            &by_name,
+            &mut mark,
+            &mut Vec::new(),
+        )?;
     }
     Ok(())
 }
@@ -101,20 +159,77 @@ pub fn select_batch(tasks: &[Task], budget: f64) -> (Vec<RankedTask>, f64) {
     (plan.selected, plan.used_effort)
 }
 
-fn select_from_ranked(ranked: Vec<RankedTask>, budget: f64) -> BatchPlan {
-    let mut selected = Vec::new();
-    let mut used = 0.0;
-    let mut skipped = 0;
+fn select_from_ranked(ranked: Vec<RankedTask>, all_tasks: &[Task], budget: f64) -> BatchPlan {
+    use std::collections::HashSet;
     let safe_budget = budget.max(0.0);
+    let known: HashSet<String> = all_tasks
+        .iter()
+        .map(|t| t.name.trim().to_lowercase())
+        .collect();
+    let mut done: HashSet<String> = HashSet::new();
+    let mut taken = vec![false; ranked.len()];
+    let mut used = 0.0;
+    let index_of: std::collections::HashMap<String, usize> = ranked
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.task.name.trim().to_lowercase(), i))
+        .collect();
 
-    for ranked_task in ranked {
-        let effort = normalized_effort(ranked_task.task.effort);
-        if used + effort > safe_budget {
-            skipped += 1;
+    // In rank order, each task comes with whatever it still waits on: a
+    // high-value task pulls its prerequisites forward and the bundle goes in
+    // whole or not at all, so cheap lower-ranked work can't crowd it out.
+    for i in 0..ranked.len() {
+        if taken[i] {
             continue;
         }
-        used += effort;
-        selected.push(ranked_task);
+        let mut bundle = Vec::new();
+        let mut stack = vec![i];
+        let mut satisfiable = true;
+        while let Some(j) = stack.pop() {
+            if taken[j] || bundle.contains(&j) {
+                continue;
+            }
+            bundle.push(j);
+            for dep in &ranked[j].task.depends_on {
+                let key = dep.trim().to_lowercase();
+                if !known.contains(&key) || done.contains(&key) {
+                    continue;
+                }
+                // Known but filtered out (min score, top N): it can't be in this batch.
+                match index_of.get(&key) {
+                    Some(&k) => stack.push(k),
+                    None => satisfiable = false,
+                }
+            }
+        }
+        let effort: f64 = bundle
+            .iter()
+            .map(|&j| normalized_effort(ranked[j].task.effort))
+            .sum();
+        if satisfiable && used + effort <= safe_budget {
+            used += effort;
+            for &j in &bundle {
+                taken[j] = true;
+                done.insert(ranked[j].task.name.trim().to_lowercase());
+            }
+        }
+    }
+
+    let mut selected = Vec::new();
+    let mut blocked = Vec::new();
+    let mut skipped = 0;
+    for (i, item) in ranked.into_iter().enumerate() {
+        if taken[i] {
+            selected.push(item);
+            continue;
+        }
+        skipped += 1;
+        // It would fit on its own, so what keeps it out is what it waits on.
+        if !item.task.depends_on.is_empty()
+            && used + normalized_effort(item.task.effort) <= safe_budget
+        {
+            blocked.push(item.task.name.clone());
+        }
     }
 
     BatchPlan {
@@ -122,12 +237,13 @@ fn select_from_ranked(ranked: Vec<RankedTask>, budget: f64) -> BatchPlan {
         used_effort: used,
         skipped_tasks: skipped,
         selected,
+        blocked,
     }
 }
 
 pub fn select_batch_detailed(tasks: &[Task], budget: f64) -> BatchPlan {
     let ranked = prioritize(tasks);
-    select_from_ranked(ranked, budget)
+    select_from_ranked(ranked, tasks, budget)
 }
 
 pub fn select_batch_detailed_filtered(
@@ -137,7 +253,7 @@ pub fn select_batch_detailed_filtered(
     top: usize,
 ) -> BatchPlan {
     let ranked = prioritize_with_filters(tasks, min_score, top);
-    select_from_ranked(ranked, budget)
+    select_from_ranked(ranked, tasks, budget)
 }
 
 /// The modified Fibonacci scale SAFe uses for relative WSJF estimates.
@@ -190,8 +306,8 @@ pub fn to_relative_scale(tasks: &[Task]) -> Vec<Task> {
 #[cfg(test)]
 mod tests {
     use super::{
-        prioritize, prioritize_with_filters, select_batch, to_relative_scale, validate_tasks, wsjf,
-        Task,
+        prioritize, prioritize_with_filters, select_batch, select_batch_detailed,
+        to_relative_scale, validate_tasks, wsjf, Task,
     };
 
     #[test]
@@ -203,6 +319,7 @@ mod tests {
                 time_criticality: 2.0,
                 risk_reduction: 2.0,
                 effort: 4.0,
+                depends_on: vec![],
             },
             Task {
                 name: "High".to_string(),
@@ -210,6 +327,7 @@ mod tests {
                 time_criticality: 9.0,
                 risk_reduction: 7.0,
                 effort: 3.0,
+                depends_on: vec![],
             },
         ];
 
@@ -226,6 +344,7 @@ mod tests {
                 time_criticality: 5.0,
                 risk_reduction: 5.0,
                 effort: 3.0,
+                depends_on: vec![],
             },
             Task {
                 name: "Alpha".to_string(),
@@ -233,6 +352,7 @@ mod tests {
                 time_criticality: 5.0,
                 risk_reduction: 5.0,
                 effort: 3.0,
+                depends_on: vec![],
             },
         ];
 
@@ -248,6 +368,7 @@ mod tests {
             time_criticality: 5.0,
             risk_reduction: 5.0,
             effort: 0.01,
+            depends_on: vec![],
         };
 
         let score = wsjf(&task);
@@ -263,6 +384,7 @@ mod tests {
                 time_criticality: 8.0,
                 risk_reduction: 8.0,
                 effort: 2.0,
+                depends_on: vec![],
             },
             Task {
                 name: "B".to_string(),
@@ -270,6 +392,7 @@ mod tests {
                 time_criticality: 3.0,
                 risk_reduction: 3.0,
                 effort: 2.0,
+                depends_on: vec![],
             },
             Task {
                 name: "C".to_string(),
@@ -277,6 +400,7 @@ mod tests {
                 time_criticality: 7.0,
                 risk_reduction: 6.0,
                 effort: 2.0,
+                depends_on: vec![],
             },
         ];
 
@@ -294,6 +418,7 @@ mod tests {
                 time_criticality: 7.0,
                 risk_reduction: 6.0,
                 effort: 4.0,
+                depends_on: vec![],
             },
             Task {
                 name: "B".to_string(),
@@ -301,6 +426,7 @@ mod tests {
                 time_criticality: 8.0,
                 risk_reduction: 8.0,
                 effort: 5.0,
+                depends_on: vec![],
             },
             Task {
                 name: "C".to_string(),
@@ -308,6 +434,7 @@ mod tests {
                 time_criticality: 6.0,
                 risk_reduction: 6.0,
                 effort: 3.0,
+                depends_on: vec![],
             },
         ];
 
@@ -322,6 +449,7 @@ mod tests {
             time_criticality: time,
             risk_reduction: risk,
             effort,
+            depends_on: vec![],
         }
     }
 
@@ -382,5 +510,55 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.contains("used twice"), "{err}");
+    }
+
+    fn after(mut t: Task, deps: &[&str]) -> Task {
+        t.depends_on = deps.iter().map(|d| d.to_string()).collect();
+        t
+    }
+
+    #[test]
+    fn a_task_waits_for_its_dependency() {
+        // "Launch" scores highest but needs "Schema", which only fits after it.
+        let tasks = vec![
+            after(task("Launch", 9.0, 9.0, 9.0, 2.0), &["Schema"]),
+            task("Schema", 2.0, 2.0, 2.0, 2.0),
+            task("Docs", 3.0, 3.0, 3.0, 2.0),
+        ];
+        let plan = select_batch_detailed(&tasks, 4.0);
+        let names: Vec<&str> = plan.selected.iter().map(|r| r.task.name.as_str()).collect();
+        assert_eq!(names, vec!["Launch", "Schema"]);
+        assert!(plan.blocked.is_empty());
+    }
+
+    #[test]
+    fn a_task_whose_dependency_does_not_fit_is_reported_blocked() {
+        let tasks = vec![
+            after(task("Launch", 9.0, 9.0, 9.0, 1.0), &["Migrate"]),
+            task("Migrate", 1.0, 1.0, 1.0, 10.0),
+        ];
+        let plan = select_batch_detailed(&tasks, 3.0);
+        assert!(plan.selected.is_empty());
+        assert_eq!(plan.blocked, vec!["Launch".to_string()]);
+    }
+
+    #[test]
+    fn dependencies_outside_the_input_count_as_done() {
+        let tasks = vec![after(
+            task("Launch", 9.0, 9.0, 9.0, 1.0),
+            &["Already shipped"],
+        )];
+        assert_eq!(select_batch_detailed(&tasks, 3.0).selected.len(), 1);
+    }
+
+    #[test]
+    fn dependency_loops_are_rejected() {
+        let tasks = vec![
+            after(task("A", 1.0, 1.0, 1.0, 1.0), &["B"]),
+            after(task("B", 1.0, 1.0, 1.0, 1.0), &["C"]),
+            after(task("C", 1.0, 1.0, 1.0, 1.0), &["a"]),
+        ];
+        let err = validate_tasks(&tasks).unwrap_err();
+        assert!(err.contains("loop"), "{err}");
     }
 }
