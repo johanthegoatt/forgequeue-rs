@@ -23,6 +23,35 @@ pub struct BatchPlan {
     pub selected: Vec<RankedTask>,
 }
 
+/// Checks a task list before it is scored. NaN compares false against every
+/// score, so one bad row used to scramble the whole ranking without a word,
+/// and negative scores were dropped by the default minimum score of 0.
+pub fn validate_tasks(tasks: &[Task]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for (index, task) in tasks.iter().enumerate() {
+        let name = task.name.trim();
+        if name.is_empty() {
+            return Err(format!("Task {} has no name.", index + 1));
+        }
+        if !seen.insert(name.to_lowercase()) {
+            return Err(format!("Task name '{name}' is used twice."));
+        }
+        for (field, value) in [
+            ("business_value", task.business_value),
+            ("time_criticality", task.time_criticality),
+            ("risk_reduction", task.risk_reduction),
+            ("effort", task.effort),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!(
+                    "Task '{name}': {field} must be a number of 0 or more, got {value}."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn normalized_effort(value: f64) -> f64 {
     if value < 0.25 {
         0.25
@@ -160,7 +189,10 @@ pub fn to_relative_scale(tasks: &[Task]) -> Vec<Task> {
 
 #[cfg(test)]
 mod tests {
-    use super::{prioritize, prioritize_with_filters, select_batch, to_relative_scale, wsjf, Task};
+    use super::{
+        prioritize, prioritize_with_filters, select_batch, to_relative_scale, validate_tasks, wsjf,
+        Task,
+    };
 
     #[test]
     fn prioritize_orders_by_highest_score_first() {
@@ -327,5 +359,28 @@ mod tests {
         assert_eq!(relative[1].business_value, 3.0);
         assert_eq!(relative[1].time_criticality, 1.0);
         assert_eq!(relative[1].risk_reduction, 5.0);
+    }
+
+    #[test]
+    fn validation_names_the_bad_task_and_field() {
+        let err = validate_tasks(&[task("A", 1.0, f64::NAN, 1.0, 1.0)]).unwrap_err();
+        assert!(
+            err.contains("'A'") && err.contains("time_criticality"),
+            "{err}"
+        );
+        let err = validate_tasks(&[task("B", -1.0, 1.0, 1.0, 1.0)]).unwrap_err();
+        assert!(err.contains("business_value"), "{err}");
+        assert!(validate_tasks(&[task("A", 1.0, 1.0, 1.0, 1.0)]).is_ok());
+    }
+
+    #[test]
+    fn validation_rejects_blank_and_duplicate_names() {
+        assert!(validate_tasks(&[task("  ", 1.0, 1.0, 1.0, 1.0)]).is_err());
+        let err = validate_tasks(&[
+            task("Ship", 1.0, 1.0, 1.0, 1.0),
+            task("ship", 2.0, 1.0, 1.0, 1.0),
+        ])
+        .unwrap_err();
+        assert!(err.contains("used twice"), "{err}");
     }
 }

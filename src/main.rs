@@ -1,6 +1,8 @@
 use std::{env, fs};
 
-use forgequeue::{select_batch_detailed_filtered, to_relative_scale, BatchPlan, Task};
+use forgequeue::{
+    select_batch_detailed_filtered, to_relative_scale, validate_tasks, BatchPlan, Task,
+};
 
 #[derive(Debug)]
 struct CliOptions {
@@ -53,7 +55,9 @@ fn parse_args(args: &[String]) -> Result<CliOptions, String> {
                     .ok_or_else(|| String::from("Missing value for --budget"))?;
                 budget = value
                     .parse::<f64>()
-                    .map_err(|_| String::from("--budget must be a number"))?;
+                    .ok()
+                    .filter(|v| v.is_finite() && *v >= 0.0)
+                    .ok_or_else(|| String::from("--budget must be a number of 0 or more"))?;
             }
             "--json" => {
                 output_json = true;
@@ -68,7 +72,9 @@ fn parse_args(args: &[String]) -> Result<CliOptions, String> {
                     .ok_or_else(|| String::from("Missing value for --min-score"))?;
                 min_score = value
                     .parse::<f64>()
-                    .map_err(|_| String::from("--min-score must be a number"))?;
+                    .ok()
+                    .filter(|v| v.is_finite())
+                    .ok_or_else(|| String::from("--min-score must be a number"))?;
             }
             "--top" => {
                 index += 1;
@@ -77,7 +83,7 @@ fn parse_args(args: &[String]) -> Result<CliOptions, String> {
                     .ok_or_else(|| String::from("Missing value for --top"))?;
                 top = value
                     .parse::<usize>()
-                    .map_err(|_| String::from("--top must be a positive integer"))?;
+                    .map_err(|_| String::from("--top must be a whole number (0 keeps all)"))?;
             }
             unknown => {
                 return Err(format!("Unknown argument: {unknown}"));
@@ -128,6 +134,7 @@ fn parse_tasks_json(raw: &str) -> Result<Vec<Task>, String> {
     if tasks.is_empty() {
         return Err(String::from("Input file must include at least one task."));
     }
+    validate_tasks(&tasks)?;
     Ok(tasks)
 }
 
