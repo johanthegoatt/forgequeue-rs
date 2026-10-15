@@ -23,6 +23,12 @@ cd forgequeue-rs
 cargo run -- --input data/tasks.sample.json --budget 7 --json
 ```
 
+Read tasks from another tool through a pipe:
+
+```bash
+cat data/tasks.sample.json | cargo run -- --input - --budget 7 --json
+```
+
 Filter by score and top-N:
 
 ```powershell

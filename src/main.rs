@@ -1,4 +1,7 @@
-use std::{env, fs};
+use std::{
+    env, fs,
+    io::{self, Read},
+};
 
 use forgequeue::{
     select_batch_detailed_filtered, to_relative_scale, validate_tasks, BatchPlan, Task,
@@ -19,6 +22,7 @@ fn print_usage() {
     println!("Usage:");
     println!("  cargo run -- [--input <json-file>] [--budget <value>] [--min-score <value>] [--top <n>] [--relative] [--json]");
     println!();
+    println!("  --input -   read the task JSON from stdin");
     println!("  --relative  rescale value, time criticality and risk reduction so the");
     println!("              smallest item in each is 1, snapped to 1,2,3,5,8,13,20");
     println!();
@@ -142,8 +146,17 @@ fn parse_tasks_json(raw: &str) -> Result<Vec<Task>, String> {
 }
 
 fn load_tasks(input_path: &str) -> Result<Vec<Task>, String> {
-    let raw = fs::read_to_string(input_path)
-        .map_err(|err| format!("Unable to read input file '{input_path}': {err}"))?;
+    // "-" reads the tasks from stdin, so another tool can pipe its export in.
+    let raw = if input_path == "-" {
+        let mut buffer = String::new();
+        io::stdin()
+            .read_to_string(&mut buffer)
+            .map_err(|err| format!("Unable to read tasks from stdin: {err}"))?;
+        buffer
+    } else {
+        fs::read_to_string(input_path)
+            .map_err(|err| format!("Unable to read input file '{input_path}': {err}"))?
+    };
     parse_tasks_json(&raw)
 }
 
